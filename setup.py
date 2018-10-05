@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
 	name="model_import_export",
-	version="0.0.1",
+	version="0.0.2",
 	author="Ajesh Sen Thapa",
 	author_email="aj3sshh@gmail.com",
 	description="Import/Export feature for django models",
