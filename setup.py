@@ -17,7 +17,7 @@ if sys.argv[-1] == 'publish':
 
 setuptools.setup(
 	name="model_import_export",
-	version="0.0.3",
+	version="0.1.0",
 	author="Ajesh Sen Thapa",
 	author_email="aj3sshh@gmail.com",
 	description="Import/Export feature for django models",
