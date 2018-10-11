@@ -1,6 +1,9 @@
 import pandas as pd
 
 from django.db.models import Count
+from dateutil.parser import parse
+from dateutil.tz import gettz
+from django.conf import settings
 
 class ModelResource:
 	"""
@@ -27,10 +30,59 @@ class ModelResource:
 		Returns list of fields for resource
 		"""
 
-		# print(self.Meta.model._meta.fields)
-		fields = self.Meta.fields
+		has_fields = False
+		fields = []
+
+		# fields
+		if hasattr(self.Meta, 'fields'):
+			
+			# fields array
+			if type(self.Meta.fields) == list:
+				fields = self.Meta.fields
+				has_fields = True
+			
+			# all fields
+			elif self.Meta.fields == '__all__':
+				for model_field in self.Meta.model._meta.fields:
+					fields.append(model_field.name)
+				for model_field in self.Meta.model._meta.many_to_many:
+					fields.append(model_field.name)
+				has_fields = True
+
+		# exlude fields
+		elif hasattr(self.Meta, 'exclude'):
+			if type(self.Meta.exclude) == list:
+				
+				for model_field in self.Meta.model._meta.fields:
+					if not model_field.name in self.Meta.exclude:
+						fields.append(model_field.name)
+				
+				for model_field in self.Meta.model._meta.many_to_many:
+					if not model_field.name in self.Meta.exclude:
+						fields.append(model_field.name)
+				has_fields = True
+
+		if not has_fields:
+			raise Exception('fields is required')
+
 		if 'id' not in fields:
 			fields.insert(0, 'id')
+
+		for field in fields:
+			field_type = self.Meta.model._meta.get_field(field).get_internal_type()
+
+			if field_type == 'OneToOneField':
+				if not hasattr(self, field):
+					setattr(self, field, OneToOneResource())
+
+			elif field_type == 'ForeignKey':
+				if not hasattr(self, field):
+					setattr(self, field, ForeignKeyResource())
+
+			elif field_type == 'ManyToManyField':
+				if not hasattr(self, field):
+					setattr(self, field, ManyToManyResource())
+
 		return fields
 
 
@@ -46,7 +98,9 @@ class ModelResource:
 		for field in fields:
 			if hasattr(self, field):	# checking if field has attribute (special field)
 				temp_attr = getattr(self, field)
-				if type(temp_attr) == ForeignKeyResource:
+				if type(temp_attr) == OneToOneResource:
+					db_fields.append([field, 'o2o'])
+				elif type(temp_attr) == ForeignKeyResource:
 					db_fields.append([field, 'foreign'])
 				elif type(temp_attr) == RelatedResource:
 					db_fields.append([field, 'related'])
@@ -76,8 +130,8 @@ class ModelResource:
 				# normal field (just add to queryset_values and fields_values)
 				self.__fields_values.append( db_field[0] )
 				queryset_values.append( db_field[0] )
-			
-			elif db_field[1] == 'foreign':
+
+			elif db_field[1] == 'foreign' or db_field[1] == 'o2o':
 				# foreignkey field ( add to queryset_values, fields_values and rename_values)
 				self.__fields_values.append( db_field[0] + '__' + getattr(self, db_field[0]).column )
 				queryset_values.append( db_field[0] )
@@ -111,7 +165,7 @@ class ModelResource:
 		for obj in queryset:
 			o2m_field[obj.id] = dict()
 			for field in postprocess_fields:
-				texts = [ getattr(m2m_obj, getattr(self, field).column) for m2m_obj in getattr(obj, field).all() ]
+				texts = [ str(getattr(m2m_obj, getattr(self, field).column)) for m2m_obj in getattr(obj, field).all() ]
 				o2m_field[obj.id][field] = ",".join(texts)
 
 		return o2m_field
@@ -135,6 +189,25 @@ class ModelResource:
 		self.__check_queryset()
 		df = pd.DataFrame(self.__list, columns=self.__fields_values)
 		df=df.rename(columns = self.__rename_values)
+		
+		# converting datetimes to Local time
+		db_fields = self.__get_database_fields()
+		normal_fields = [ db_field[0] for db_field in db_fields if db_field[1] == 'normal']
+		
+		for field in normal_fields:
+			field_class = self.Meta.model._meta.get_field(field).get_internal_type()
+			if field_class == 'DateTimeField':
+				df[field] = pd.to_datetime(df[field], unit='s')
+				try:
+					setattr(df, field, getattr(df, field).dt.tz_localize('UTC'))
+				except:
+					pass
+				setattr(df, field, getattr(df, field).dt.tz_convert(settings.TIME_ZONE) )
+				df[field] = df[field].apply(lambda x: '' if pd.isnull(x) else str(x))
+			elif field_class == 'DateField' or field_class == 'TimeField':
+				df[field] = df[field].apply(lambda x: '' if pd.isnull(x) else str(x))
+
+
 		return df
 
 
@@ -174,14 +247,27 @@ class ModelResource:
 		updates update_df list to model
 		"""
 		db_fields = self.__get_database_fields()
-		self_kwargs = dict() # dictionary arguments passed to model object { 'field_name': 'Field_value'}
-		m2m_fields = list() # m2m list carrying [ ['field_name', 'field_value'], ... ]
-
-		row_id = 0
+		
 		for row in list(df.T.to_dict().values()):
-			m2m_fields = list()
+			row_id = 0
+			self_kwargs = dict() # dictionary arguments passed to model object { 'field_name': 'Field_value'}
+			m2m_fields = list() # m2m list carrying [ ['field_name', 'field_value'], ... ]
 
 			for field in db_fields:
+				
+				# converting NaN and NaT to None
+				if pd.isnull(row[field[0]]):
+					row[field[0]] = None
+				else:
+					# for date and times
+					field_class = self.Meta.model._meta.get_field(field[0]).get_internal_type()
+					if field_class == 'DateTimeField':
+						row[field[0]] = parse(row[field[0]])
+					elif field_class == 'DateField':
+						row[field[0]] = parse(str(row[field[0]])).date()
+					elif field_class == 'TimeField':
+						row[field[0]] = parse(str(row[field[0]])).time() 
+
 				if field[1] == 'normal':
 					if field[0] == 'id':
 						row_id = int(row[field[0]])
@@ -189,16 +275,30 @@ class ModelResource:
 					else:
 						self_kwargs[field[0]] = row[field[0]]
 						pass
+
+				elif field[1] == 'o2o':
+					column_name = getattr(self, field[0]).column 	# one to one column name
+					class_name = self.Meta.model._meta.get_field(field[0]).rel.to 	# one to one class name
+					o2o_obj = class_name.objects.filter(**{ column_name: row[field[0]] }).first()
+					if o2o_obj:
+						self_kwargs[field[0]] = o2o_obj
+				
 				elif field[1] == 'foreign':
 					column_name = getattr(self, field[0]).column 	# foreign key column name
 					class_name = self.Meta.model._meta.get_field(field[0]).rel.to 	# forieng key class name
-					self_kwargs[field[0]] = class_name.objects.filter(**{ column_name: row[field[0]] }).first()
+					foreign_obj = class_name.objects.filter(**{ column_name: row[field[0]] }).first()
+					if foreign_obj:
+						self_kwargs[field[0]] = foreign_obj
+				
 				elif field[1] == 'm2m':
 					m2m_fields.append([field[0], row[field[0]]])
 
 			# updating lists
-			self.Meta.model.objects.filter(id=row_id).update(**self_kwargs)
-			self.__save_m2m(row_id, m2m_fields)
+			try:
+				self.Meta.model.objects.filter(id=row_id).update(**self_kwargs)
+				self.__save_m2m(row_id, m2m_fields)
+			except:
+				pass
 
 		pass
 
@@ -208,25 +308,53 @@ class ModelResource:
 		creates new_df list to model
 		"""
 		db_fields = self.__get_database_fields()
-		self_kwargs = dict() # dictionary arguments passed to model object { 'field_name': 'Field_value'}
-		m2m_fields = list() # m2m list carrying [ ['field_name', 'field_value'], ... ]
-
+		
 		for row in list(df.T.to_dict().values()):
+			self_kwargs = dict() # dictionary arguments passed to model object { 'field_name': 'Field_value'}
+			m2m_fields = list() # m2m list carrying [ ['field_name', 'field_value'], ... ]
+
 			for field in db_fields:
+				
+				# converting NaN and NaT to None
+				if pd.isnull(row[field[0]]):
+					row[field[0]] = None 
+				else:
+					# for date and times
+					field_class = self.Meta.model._meta.get_field(field[0]).get_internal_type()
+					if field_class == 'DateTimeField':
+						row[field[0]] = parse(row[field[0]])
+					elif field_class == 'DateField':
+						row[field[0]] = parse(str(row[field[0]])).date()
+					elif field_class == 'TimeField':
+						row[field[0]] = parse(str(row[field[0]])).time() 
+
 				if field[1] == 'normal':
 					if field[0] != 'id':
 						self_kwargs[field[0]] = row[field[0]]
 						pass
+				
+				elif field[1] == 'o2o':
+					column_name = getattr(self, field[0]).column 	# one to one column name
+					class_name = self.Meta.model._meta.get_field(field[0]).rel.to 	# one to one class name
+					o2o_obj = class_name.objects.filter(**{ column_name: row[field[0]] }).first()
+					if o2o_obj:
+						self_kwargs[field[0]] = o2o_obj
+
 				elif field[1] == 'foreign':
 					column_name = getattr(self, field[0]).column 	# foreign key column name
 					class_name = self.Meta.model._meta.get_field(field[0]).rel.to 	# forieng key class name
-					self_kwargs[field[0]] = class_name.objects.filter(**{ column_name: row[field[0]] }).first()
+					foreign_obj = class_name.objects.filter(**{ column_name: row[field[0]] }).first()
+					if foreign_obj:
+						self_kwargs[field[0]] = foreign_obj
+
 				elif field[1] == 'm2m':
 					m2m_fields.append([field[0], row[field[0]]])
 
-			row_obj = self.Meta.model.objects.create(**self_kwargs)
-			self.__save_m2m(row_obj.id, m2m_fields)
-		pass
+			try:
+				row_obj = self.Meta.model.objects.create(**self_kwargs)
+				self.__save_m2m(row_obj.id, m2m_fields)
+			except:
+				pass
 
 
 	def __save_m2m(self, obj_id, fields):
@@ -270,6 +398,17 @@ class ModelResource:
 		pass
 
 
+class OneToOneResource:
+	"""
+	OneToOne resource
+	Used for foriegnkey field in model resource
+	"""
+	def __init__(self, **kwargs):
+		if kwargs.get('column'):
+			self.column = kwargs.get('column')
+		else:
+			self.column = 'id'
+
 class ForeignKeyResource:
 	"""
 	Foreign key resource
@@ -281,6 +420,7 @@ class ForeignKeyResource:
 		else:
 			self.column = 'id'
 
+
 class RelatedResource:
 	"""
 	Related resource for realted names
@@ -291,6 +431,7 @@ class RelatedResource:
 			self.column = kwargs.get('column')
 		else:
 			self.column = 'id'
+
 
 class ManyToManyResource:
 	"""

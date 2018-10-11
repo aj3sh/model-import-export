@@ -17,7 +17,7 @@ if sys.argv[-1] == 'publish':
 
 setuptools.setup(
 	name="model_import_export",
-	version="0.1.0",
+	version="0.1.1",
 	author="Ajesh Sen Thapa",
 	author_email="aj3sshh@gmail.com",
 	description="Import/Export feature for django models",
@@ -32,7 +32,9 @@ setuptools.setup(
 		'pandas==0.23.4',
 		'xlrd==1.1.0',
 		'xlwt==1.3.0',
-	
+		'python-dateutil==2.7.3'
+		'pytz==2018.5'
+		
 	],
 	classifiers=[
 
